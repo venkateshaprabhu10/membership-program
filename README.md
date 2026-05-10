@@ -19,6 +19,7 @@ A backend system for **FirstClub** — a quality-first quick commerce platform d
 5. [Getting Started](#getting-started)
 6. [H2 Database Console](#h2-database-console)
 7. [API Reference](#api-reference)
+   - [Health & Status](#health--status)
    - [Members](#members)
    - [Plans](#plans)
    - [Tiers](#tiers)
@@ -28,7 +29,8 @@ A backend system for **FirstClub** — a quality-first quick commerce platform d
    - [Admin — Cohorts](#admin--cohorts)
    - [Admin — Sub-brands](#admin--sub-brands)
 8. [Configuring for a New Brand](#configuring-for-a-new-brand)
-9. [Design & Concurrency Notes](#design--concurrency-notes)
+9. [Best Practices Followed](#best-practices-followed)
+10. [Design & Concurrency Notes](#design--concurrency-notes)
 
 ---
 
@@ -268,6 +270,35 @@ Seeded IDs for reference:
 - **Tiers**: 1 = Silver, 2 = Gold, 3 = Platinum
 - **Cohorts**: 1 = Early Adopters, 2 = B2B Buyers
 - **Sub-brands**: 1 = FirstClub Fresh (slug: `fresh`), 2 = FirstClub B2B (slug: `b2b`)
+
+---
+
+### Health & Status
+
+Two lightweight endpoints to verify the service is up — useful when sharing or demoing on another machine.
+
+#### Ping (simplest possible check)
+```bash
+curl http://localhost:8080/ping
+# → pong
+```
+
+#### Health (brand info + status)
+```bash
+curl http://localhost:8080/api/health
+```
+```json
+{
+  "success": true,
+  "message": "Service is running",
+  "data": {
+    "status": "UP",
+    "brand": "FirstClub",
+    "currency": "INR",
+    "perkStrategy": "UNION_MAX_VALUE"
+  }
+}
+```
 
 ---
 
@@ -519,6 +550,55 @@ brand.perk-stacking-strategy=UNION_MAX_VALUE
 ```
 
 To onboard a new brand (e.g. Licious), create `application-licious.properties` with Licious-specific values and run with `--spring.profiles.active=licious`. Plans, tiers, perks, and cohorts are seeded via `DataSeeder` — update that class (or replace it with a DB migration) to seed the new brand's data.
+
+---
+
+## Best Practices Followed
+
+### Architecture & Design Patterns
+
+| Practice | How it's applied |
+|---|---|
+| **Layered architecture** | Strict Controller → Service → Repository separation; no layer skips |
+| **Strategy pattern** | `TierCriteriaStrategy` (3 impls) and `PerkStackingStrategy` (2 impls) — new strategies added without touching existing code |
+| **Observer / Event pattern** | `OrderService` publishes `OrderRecordedEvent`; `TierEvaluationListener` reacts — zero coupling between order and tier logic |
+| **Factory pattern** | `PerkStrategyConfig` selects the active `PerkStackingStrategy` bean at startup based on brand config |
+| **Deploy-per-brand (12-Factor)** | Brand identity and behaviour live entirely in `application.properties`; no tenant ID in code or headers |
+| **EnumMap for strategy dispatch** | Strategies are registered in an `EnumMap<CriteriaType, TierCriteriaStrategy>` at construction — O(1) dispatch, no if-else chains |
+
+### SOLID Principles
+
+| Principle | Where |
+|---|---|
+| **Single Responsibility** | Each service owns exactly one domain (`OrderService`, `TierEvaluationService`, `PerkResolutionService`, etc.) |
+| **Open / Closed** | Adding a new tier criterion or perk strategy = new class + new enum value; zero changes to existing classes |
+| **Liskov Substitution** | Any `TierCriteriaStrategy` or `PerkStackingStrategy` impl is interchangeable at the injection point |
+| **Interface Segregation** | Strategy interfaces are thin — single `evaluate()` or `merge()` method each |
+| **Dependency Inversion** | Services depend on interfaces (`TierCriteriaStrategy`, `PerkStackingStrategy`), not concrete classes |
+
+### Java & Spring Best Practices
+
+| Practice | How it's applied |
+|---|---|
+| **Constructor injection** | All dependencies injected via constructor (`@RequiredArgsConstructor`), never field injection |
+| **Immutable DTOs** | Request and response DTOs are Java records — immutable by construction |
+| **Fail-fast validation** | `@Valid` + Bean Validation annotations on all request DTOs; rejected at the controller boundary |
+| **Transactional hygiene** | `@Transactional` on writes, `@Transactional(readOnly = true)` on reads — prevents accidental dirty writes on read paths |
+| **Lazy loading** | `FetchType.LAZY` on all entity relationships — no N+1 surprise loads |
+| **Optimistic locking** | `@Version` on `Subscription` — concurrent tier updates are safe without pessimistic locks |
+| **Async with named pool** | `@Async("tierEvaluationExecutor")` — burst of orders cannot starve main HTTP threads; threads are named `tier-eval-*` for easy monitoring |
+| **Global exception handling** | `@RestControllerAdvice` maps typed exceptions to correct HTTP status codes consistently |
+| **Consistent API envelope** | All responses use `ApiResponse<T>` — predictable shape for every caller |
+| **Semantic HTTP status codes** | `201` for creates, `200` for reads/updates, `400` for business rule violations, `404` for not found, `500` for unexpected errors |
+
+### Code Quality
+
+| Practice | How it's applied |
+|---|---|
+| **Minimal, meaningful comments** | Comments only where the WHY is non-obvious (concurrency strategy, FREE_DELIVERY inversion, transient aggregation) |
+| **Descriptive naming** | No abbreviations; class/method names read like sentences (`evaluateAndUpdate`, `getEffectivePerks`, `anyCriterionPasses`) |
+| **No over-engineering** | No unnecessary abstractions, no premature generics, no half-finished features |
+| **Configurable seed data** | `DataSeeder` sets up a complete runnable demo on startup — no manual DB setup needed |
 
 ---
 
